@@ -54,7 +54,7 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
     }
 
     final appStoreBinaryPath = results['app-store-binary'] as String;
-    final appStoreBinary = File(appStoreBinaryPath);
+    final appStoreBinary = Directory(appStoreBinaryPath);
 
     if (!appStoreBinary.existsSync()) {
       logger.err('App Store binary not found at: $appStoreBinaryPath');
@@ -97,7 +97,7 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
   Future<void> finalizeReleaseWithAppStoreBinary({
     required String appId,
     required String releaseVersion,
-    required File appStoreBinary,
+    required Directory appStoreBinary,
   }) async {
     final progress = logger.progress(
       'Finalizing release with App Store binary',
@@ -164,7 +164,7 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
   }
 
   /// Extracts the hash from the App Store signed binary.
-  Future<String> extractAppStoreBinaryHash(File appStoreBinary) async {
+  Future<String> extractAppStoreBinaryHash(Directory appStoreBinary) async {
     // Create a temporary zip file of the App Store binary
     final tempDir = await Directory.systemTemp.createTemp();
     final zippedApp = File(
@@ -177,7 +177,8 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
     );
 
     try {
-      final appStoreBinaryBytes = await appStoreBinary.readAsBytes();
+      // For .app bundles, we need to read the zipped version for hash calculation
+      final appStoreBinaryBytes = await zippedApp.readAsBytes();
       final appStoreHash = sha256.convert(appStoreBinaryBytes).toString();
 
       return appStoreHash;
@@ -200,7 +201,7 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
     required String appId,
     required int releaseId,
     required String newHash,
-    required File appStoreBinary,
+    required Directory appStoreBinary,
   }) async {
     // TODO(ahmtydn): Implement server-side API for updating release artifact
     // hashes. For now, we'll create a new artifact with the App Store binary
