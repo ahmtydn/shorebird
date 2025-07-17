@@ -89,6 +89,9 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
   /// The build flavor, if provided.
   String? get flavor => results.findOption('flavor', argParser: argParser);
 
+  /// The shorebird app ID for the current project.
+  String get appId => shorebirdEnv.getShorebirdYaml()!.getAppId(flavor: flavor);
+
   /// Finalizes a draft release by updating it with the App Store signed binary.
   Future<void> finalizeReleaseWithAppStoreBinary({
     required String appId,
@@ -101,9 +104,14 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
 
     try {
       // Get the existing release
-      final release = await codePushClientWrapper.getRelease(
-        appId: appId,
-        releaseVersion: releaseVersion,
+      // final release = await codePushClientWrapper.getRelease(
+      //   appId: appId,
+      //   releaseVersion: releaseVersion,
+      // );
+      // TODO(ahmtydn): delete this after the server-side API supports
+      final release = await getOrCreateRelease(
+        version: releaseVersion,
+        releasePlatform: ReleasePlatform.macos,
       );
 
       // Verify this is a draft release for macOS
@@ -196,33 +204,45 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
     // TODO(ahmtydn): Implement server-side API for updating release artifact
     // hashes. For now, we'll create a new artifact with the App Store binary
 
-    final tempDir = await Directory.systemTemp.createTemp();
-    final zippedApp = File(
-      p.join(tempDir.path, '${p.basename(appStoreBinary.path)}.zip'),
-    );
-
-    try {
-      // Create archive of App Store binary
-      await Process.run(
-        'ditto',
-        ['-c', '-k', '--sequesterRsrc', appStoreBinary.path, zippedApp.path],
-        runInShell: true,
-      );
-
-      // Create a new release artifact with the App Store binary
-      // This would need to be implemented as a server-side API endpoint
-      await codePushClientWrapper.createMacosReleaseArtifacts(
-        appId: appId,
-        releaseId: releaseId,
-        appPath: appStoreBinary.path,
-        isCodesigned: true,
-        podfileLockHash: null, // App Store version doesn't need podfile hash
-      );
-    } finally {
-      // Clean up temporary files
-      if (tempDir.existsSync()) {
-        await tempDir.delete(recursive: true);
-      }
+    final String? podfileLockHash;
+    if (shorebirdEnv.macosPodfileLockFile.existsSync()) {
+      podfileLockHash = sha256
+          .convert(shorebirdEnv.macosPodfileLockFile.readAsBytesSync())
+          .toString();
+    } else {
+      podfileLockHash = null;
     }
+
+    // Create a new release artifact with the App Store binary
+    // This would need to be implemented as a server-side API endpoint
+    await codePushClientWrapper.createMacosReleaseArtifacts(
+      appId: appId,
+      releaseId: releaseId,
+      appPath: appStoreBinary.path,
+      isCodesigned: true,
+      // TODO(ahmtydn): App Store version doesn't need podfile hash but
+      // temporarily testing with it
+      // until server-side API supports updating existing artifacts.
+      podfileLockHash: podfileLockHash,
+    );
+  }
+
+  /// Fetches the release with version [version] from the server or creates a
+  /// new release if none exists.
+  // TODO(ahmtydn): delete this method after the server-side API supports
+  Future<Release> getOrCreateRelease({
+    required String version,
+    required ReleasePlatform releasePlatform,
+  }) async {
+    return await codePushClientWrapper.maybeGetRelease(
+          appId: appId,
+          releaseVersion: version,
+        ) ??
+        await codePushClientWrapper.createRelease(
+          appId: appId,
+          version: version,
+          flutterRevision: shorebirdEnv.flutterRevision,
+          platform: releasePlatform,
+        );
   }
 }
