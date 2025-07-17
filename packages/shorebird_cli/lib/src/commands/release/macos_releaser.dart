@@ -189,31 +189,66 @@ To change the version of this release, change your app's version in your pubspec
       final tempDir = Directory.systemTemp.createTempSync(
         'shorebird_pkg_extract_',
       );
-      final expandResult = await Process.run('pkgutil', [
-        '--expand',
-        pkgFile.path,
-        tempDir.path,
-      ]);
-      if (expandResult.exitCode != 0) {
-        logger.err(
-          'pkgutil --expand '
-          'failed: ${expandResult.stderr}\n${expandResult.stdout}',
+      try {
+        // 1. Expand the .pkg file using pkgutil
+        final expandResult = await Process.run('pkgutil', [
+          '--expand',
+          pkgFile.path,
+          tempDir.path,
+        ]);
+        if (expandResult.exitCode != 0) {
+          logger.err(
+            'pkgutil --expand '
+            'failed: ${expandResult.stderr}\n${expandResult.stdout}',
+          );
+          throw ProcessExit(expandResult.exitCode);
+        }
+        // 2. Find the Payload file
+        final payloadFile = tempDir
+            .listSync(recursive: true)
+            .whereType<File>()
+            .firstWhere(
+              (f) => p.basename(f.path) == 'Payload',
+              orElse: () => throw Exception('Payload file not found!'),
+            );
+        // 3. Extract the Payload file to a separate directory
+        final payloadExtractDir = Directory(
+          p.join(tempDir.path, 'payload_extract'),
         );
-        throw ProcessExit(expandResult.exitCode);
-      }
-      FileSystemEntity? foundApp;
-      await for (final entity in tempDir.list(recursive: true)) {
-        if (entity is Directory && entity.path.endsWith('.app')) {
-          foundApp = entity;
-          break;
+        if (!payloadExtractDir.existsSync()) {
+          payloadExtractDir.createSync();
+        }
+        final cpioResult = await Process.run(
+          'cpio',
+          ['-i', '-F', payloadFile.path],
+          workingDirectory: payloadExtractDir.path,
+        );
+        if (cpioResult.exitCode != 0) {
+          logger.err(
+            'cpio extraction '
+            'failed: ${cpioResult.stderr}\n${cpioResult.stdout}',
+          );
+          throw ProcessExit(cpioResult.exitCode);
+        }
+        // 4. Find the .app directory inside the extracted payload
+        FileSystemEntity? foundApp;
+        await for (final entity in payloadExtractDir.list(recursive: true)) {
+          if (entity is Directory && entity.path.endsWith('.app')) {
+            foundApp = entity;
+            break;
+          }
+        }
+        if (foundApp == null) {
+          logger.err('No .app directory found inside extracted Payload!');
+          throw ProcessExit(ExitCode.software.code);
+        }
+        uploadApp = foundApp;
+        logger.info('Uploading .app extracted from .pkg: ${foundApp.path}');
+      } finally {
+        if (tempDir.existsSync()) {
+          tempDir.deleteSync(recursive: true);
         }
       }
-      if (foundApp == null) {
-        logger.err('No .app found in expanded .pkg');
-        throw ProcessExit(ExitCode.software.code);
-      }
-      uploadApp = foundApp;
-      logger.info('Uploading .app extracted from .pkg: ${foundApp.path}');
     } else {
       uploadApp = builtArtifact;
     }
