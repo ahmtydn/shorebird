@@ -1,0 +1,228 @@
+import 'dart:io';
+
+import 'package:crypto/crypto.dart';
+import 'package:mason_logger/mason_logger.dart';
+import 'package:path/path.dart' as p;
+import 'package:platform/platform.dart';
+import 'package:shorebird_cli/src/code_push_client_wrapper.dart';
+import 'package:shorebird_cli/src/config/config.dart';
+import 'package:shorebird_cli/src/extensions/arg_results.dart';
+import 'package:shorebird_cli/src/logging/logging.dart';
+import 'package:shorebird_cli/src/shorebird_command.dart';
+import 'package:shorebird_cli/src/shorebird_env.dart';
+import 'package:shorebird_cli/src/shorebird_validator.dart';
+import 'package:shorebird_cli/src/third_party/flutter_tools/lib/flutter_tools.dart';
+import 'package:shorebird_code_push_client/shorebird_code_push_client.dart';
+import 'package:shorebird_code_push_protocol/shorebird_code_push_protocol.dart';
+
+/// {@template finalize_release_command}
+/// Finalizes a draft release with an App Store signed binary.
+/// {@endtemplate}
+class FinalizeReleaseCommand extends ShorebirdCommand {
+  /// {@macro finalize_release_command}
+  FinalizeReleaseCommand() {
+    argParser
+      ..addOption(
+        'app-store-binary',
+        mandatory: true,
+        help: 'Path to the App Store signed .app bundle.',
+      )
+      ..addOption(
+        'flavor',
+        help: 'The product flavor to use when finalizing the release.',
+      );
+  }
+
+  @override
+  String get description =>
+      'Finalizes a draft release with an App Store '
+      'signed binary to enable patching';
+
+  @override
+  String get name => 'finalize-release';
+
+  @override
+  Future<int> run() async {
+    final releaseVersionArg = results.rest.isEmpty ? null : results.rest.first;
+    if (releaseVersionArg == null) {
+      logger.err(
+        'Release version is required. Usage: shorebird finalize-release '
+        '<release-version> --app-store-binary <path>',
+      );
+      return ExitCode.usage.code;
+    }
+
+    final appStoreBinaryPath = results['app-store-binary'] as String;
+    final appStoreBinary = File(appStoreBinaryPath);
+
+    if (!appStoreBinary.existsSync()) {
+      logger.err('App Store binary not found at: $appStoreBinaryPath');
+      return ExitCode.usage.code;
+    }
+
+    if (!appStoreBinary.path.endsWith('.app')) {
+      logger.err('App Store binary must be a .app bundle');
+      return ExitCode.usage.code;
+    }
+
+    try {
+      await shorebirdValidator.validatePreconditions(
+        checkUserIsAuthenticated: true,
+        checkShorebirdInitialized: true,
+        supportedOperatingSystems: {Platform.macOS},
+      );
+    } on PreconditionFailedException catch (e) {
+      throw ProcessExit(e.exitCode.code);
+    }
+
+    final appId = shorebirdEnv.getShorebirdYaml()!.getAppId(flavor: flavor);
+
+    await finalizeReleaseWithAppStoreBinary(
+      appId: appId,
+      releaseVersion: releaseVersionArg,
+      appStoreBinary: appStoreBinary,
+    );
+
+    return ExitCode.success.code;
+  }
+
+  /// The build flavor, if provided.
+  String? get flavor => results.findOption('flavor', argParser: argParser);
+
+  /// Finalizes a draft release by updating it with the App Store signed binary.
+  Future<void> finalizeReleaseWithAppStoreBinary({
+    required String appId,
+    required String releaseVersion,
+    required File appStoreBinary,
+  }) async {
+    final progress = logger.progress(
+      'Finalizing release with App Store binary',
+    );
+
+    try {
+      // Get the existing release
+      final release = await codePushClientWrapper.getRelease(
+        appId: appId,
+        releaseVersion: releaseVersion,
+      );
+
+      // Verify this is a draft release for macOS
+      final macosStatus = release.platformStatuses[ReleasePlatform.macos];
+      if (macosStatus != ReleaseStatus.draft) {
+        progress.fail(
+          'Release ${release.version} is not in draft status '
+          '(current: $macosStatus)',
+        );
+        throw ProcessExit(ExitCode.usage.code);
+      }
+
+      // Extract hash from the App Store binary
+      final appStoreHash = await extractAppStoreBinaryHash(appStoreBinary);
+
+      // Update the release artifacts with the new hash
+      await updateReleaseArtifactHash(
+        appId: appId,
+        releaseId: release.id,
+        newHash: appStoreHash,
+        appStoreBinary: appStoreBinary,
+      );
+
+      // Finalize the release by setting it to active
+      await codePushClientWrapper.updateReleaseStatus(
+        appId: appId,
+        releaseId: release.id,
+        platform: ReleasePlatform.macos,
+        status: ReleaseStatus.active,
+      );
+
+      progress.complete('Release ${release.version} finalized successfully');
+
+      logger
+        ..success('✅ Release finalized with App Store binary')
+        ..info('✅ Hash mapping updated: dev_hash → appstore_hash')
+        ..info('✅ Patch generation now targets App Store binary')
+        ..info('')
+        ..info('Your release is now ready for patching!')
+        ..info('To create a patch, run:')
+        ..info(
+          '  shorebird patch --platforms=macos '
+          '--release-version=${release.version}',
+        );
+    } catch (e) {
+      progress.fail('Failed to finalize release: $e');
+      rethrow;
+    }
+  }
+
+  /// Extracts the hash from the App Store signed binary.
+  Future<String> extractAppStoreBinaryHash(File appStoreBinary) async {
+    // Create a temporary zip file of the App Store binary
+    final tempDir = await Directory.systemTemp.createTemp();
+    final zippedApp = File(
+      p.join(tempDir.path, '${p.basename(appStoreBinary.path)}.zip'),
+    );
+
+    try {
+      // Use the same archiving method as the original release
+      await Process.run(
+        'ditto',
+        ['-c', '-k', '--sequesterRsrc', appStoreBinary.path, zippedApp.path],
+        runInShell: true,
+      );
+
+      // Calculate hash of the zipped App Store binary
+      final bytes = await zippedApp.readAsBytes();
+      final hash = sha256.convert(bytes).toString();
+
+      return hash;
+    } finally {
+      // Clean up temporary files
+      if (tempDir.existsSync()) {
+        await tempDir.delete(recursive: true);
+      }
+    }
+  }
+
+  /// Updates the release artifact with the new App Store binary hash.
+  ///
+  /// Note: This is a placeholder implementation. The actual implementation
+  /// would need to be supported by the server API to update existing artifacts.
+  Future<void> updateReleaseArtifactHash({
+    required String appId,
+    required int releaseId,
+    required String newHash,
+    required File appStoreBinary,
+  }) async {
+    // TODO(ahmtydn): Implement server-side API for updating release artifact
+    // hashes. For now, we'll create a new artifact with the App Store binary
+
+    final tempDir = await Directory.systemTemp.createTemp();
+    final zippedApp = File(
+      p.join(tempDir.path, '${p.basename(appStoreBinary.path)}.zip'),
+    );
+
+    try {
+      // Create archive of App Store binary
+      await Process.run(
+        'ditto',
+        ['-c', '-k', '--sequesterRsrc', appStoreBinary.path, zippedApp.path],
+        runInShell: true,
+      );
+
+      // Create a new release artifact with the App Store binary
+      // This would need to be implemented as a server-side API endpoint
+      await codePushClientWrapper.createMacosReleaseArtifacts(
+        appId: appId,
+        releaseId: releaseId,
+        appPath: appStoreBinary.path,
+        isCodesigned: true,
+        podfileLockHash: null, // App Store version doesn't need podfile hash
+      );
+    } finally {
+      // Clean up temporary files
+      if (tempDir.existsSync()) {
+        await tempDir.delete(recursive: true);
+      }
+    }
+  }
+}

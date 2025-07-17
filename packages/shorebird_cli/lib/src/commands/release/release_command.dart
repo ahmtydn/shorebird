@@ -76,6 +76,13 @@ class ReleaseCommand extends ShorebirdCommand {
         negatable: false,
         help: 'Validate but do not upload the release.',
       )
+      ..addFlag(
+        'draft',
+        negatable: false,
+        help:
+            'Create a draft release that can be finalized later with '
+            'App Store binary.',
+      )
       ..addOption(
         CommonArguments.exportOptionsPlistArg.name,
         help: CommonArguments.exportOptionsPlistArg.description,
@@ -233,6 +240,9 @@ of the iOS app that is using this module. (aar and ios-framework only)''',
   /// Whether --no-confirm was passed.
   bool get noConfirm => results['no-confirm'] == true;
 
+  /// Whether --draft was passed.
+  bool get isDraft => results['draft'] == true;
+
   /// The flutter version specified.
   String get flutterVersionArg => results['flutter-version'] as String;
 
@@ -322,21 +332,41 @@ of the iOS app that is using this module. (aar and ios-framework only)''',
         );
         await prepareRelease(release: release, releaser: releaser);
         await releaser.uploadReleaseArtifacts(release: release, appId: appId);
-        await finalizeRelease(release: release, releaser: releaser);
 
-        logger
-          ..success('''
+        if (isDraft) {
+          await finalizeDraftRelease(release: release, releaser: releaser);
+        } else {
+          await finalizeRelease(release: release, releaser: releaser);
+        }
+
+        if (isDraft) {
+          logger
+            ..success('''
+
+✅ Draft Release ${release.version} created!''')
+            ..info('''
+
+📋 Next steps:
+   1. Submit your app to the App Store using your standard process
+   2. Once approved, download the signed binary from App Store Connect
+   3. Run: shorebird finalize-release ${release.version} --app-store-binary <path>
+''')
+            ..info(releaser.postReleaseInstructions);
+        } else {
+          logger
+            ..success('''
 
 ✅ Published Release ${release.version}!''')
-          ..info(releaser.postReleaseInstructions);
+            ..info(releaser.postReleaseInstructions);
 
-        printPatchInstructions(
-          releaser: releaser,
-          releaseVersion: releaseVersion,
-          releaseType: releaser.releaseType,
-          flavor: flavor,
-          target: target,
-        );
+          printPatchInstructions(
+            releaser: releaser,
+            releaseVersion: releaseVersion,
+            releaseType: releaser.releaseType,
+            flavor: flavor,
+            target: target,
+          );
+        }
       },
       values: {shorebirdEnvRef.overrideWith(() => releaseFlutterShorebirdEnv)},
     );
@@ -551,6 +581,33 @@ ${summary.join('\n')}
       releaseId: release.id,
       platform: releaser.releaseType.releasePlatform,
       status: ReleaseStatus.active,
+      metadata: updatedMetadata.toJson(),
+    );
+  }
+
+  /// Finalizes a draft release by keeping it in draft status.
+  Future<void> finalizeDraftRelease({
+    required Release release,
+    required Releaser releaser,
+  }) async {
+    final baseMetadata = UpdateReleaseMetadata(
+      releasePlatform: releaser.releaseType.releasePlatform,
+      flutterVersionOverride: flutterVersionArg,
+      environment: BuildEnvironmentMetadata(
+        flutterRevision: shorebirdEnv.flutterRevision,
+        operatingSystem: platform.operatingSystem,
+        operatingSystemVersion: platform.operatingSystemVersion,
+        shorebirdVersion: packageVersion,
+        shorebirdYaml: shorebirdEnv.getShorebirdYaml()!,
+      ),
+    );
+    final updatedMetadata = await releaser.updatedReleaseMetadata(baseMetadata);
+    // Keep release in draft status for App Store finalization
+    await codePushClientWrapper.updateReleaseStatus(
+      appId: appId,
+      releaseId: release.id,
+      platform: releaser.releaseType.releasePlatform,
+      status: ReleaseStatus.draft,
       metadata: updatedMetadata.toJson(),
     );
   }

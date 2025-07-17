@@ -634,5 +634,22 @@ For more information see: ${supportedFlutterVersionsUrl.toLink()}'''),
         ).called(1);
       });
     });
+
+    group('isDraft', () {
+      test('returns true when --draft flag is provided', () {
+        when(() => argResults['draft']).thenReturn(true);
+        expect(command.isDraft, isTrue);
+      });
+
+      test('returns false when --draft flag is not provided', () {
+        when(() => argResults['draft']).thenReturn(false);
+        expect(command.isDraft, isFalse);
+      });
+
+      test('returns false when --draft flag is null', () {
+        when(() => argResults['draft']).thenReturn(null);
+        expect(command.isDraft, isFalse);
+      });
+    });
   });
 }

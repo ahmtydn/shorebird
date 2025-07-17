@@ -1,6 +1,7 @@
 export 'cache/cache.dart';
 export 'create.dart';
 export 'doctor_command.dart';
+export 'finalize_release_command.dart';
 export 'flutter/flutter.dart';
 export 'init_command.dart';
 export 'login_ci_command.dart';
