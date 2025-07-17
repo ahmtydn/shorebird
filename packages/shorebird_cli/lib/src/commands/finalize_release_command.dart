@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:platform/platform.dart';
 import 'package:shorebird_cli/src/code_push_client_wrapper.dart';
 import 'package:shorebird_cli/src/config/config.dart';
+import 'package:shorebird_cli/src/executables/ditto.dart';
 import 'package:shorebird_cli/src/extensions/arg_results.dart';
 import 'package:shorebird_cli/src/logging/logging.dart';
 import 'package:shorebird_cli/src/shorebird_command.dart';
@@ -170,19 +171,19 @@ class FinalizeReleaseCommand extends ShorebirdCommand {
       p.join(tempDir.path, '${p.basename(appStoreBinary.path)}.zip'),
     );
 
+    await ditto.archive(
+      source: appStoreBinary.path,
+      destination: zippedApp.path,
+    );
+
     try {
-      // Use the same archiving method as the original release
-      await Process.run(
-        'ditto',
-        ['-c', '-k', '--sequesterRsrc', appStoreBinary.path, zippedApp.path],
-        runInShell: true,
-      );
+      final appStoreBinaryBytes = await appStoreBinary.readAsBytes();
+      final appStoreHash = sha256.convert(appStoreBinaryBytes).toString();
 
-      // Calculate hash of the zipped App Store binary
-      final bytes = await zippedApp.readAsBytes();
-      final hash = sha256.convert(bytes).toString();
-
-      return hash;
+      return appStoreHash;
+    } on Exception catch (e) {
+      logger.err('Failed to extract App Store binary hash: $e');
+      throw ProcessExit(ExitCode.software.code);
     } finally {
       // Clean up temporary files
       if (tempDir.existsSync()) {
