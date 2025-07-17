@@ -136,7 +136,69 @@ To change the version of this release, change your app's version in your pubspec
         throw ProcessExit(result.exitCode);
       }
       logger.info('Created signed pkg at $pkgPath');
-      return File(pkgPath);
+
+      // Extract .app from .pkg and replace the original .app directory
+      final tempDir = Directory.systemTemp.createTempSync(
+        'shorebird_pkg_extract_',
+      );
+      try {
+        final expandResult = await Process.run('pkgutil', [
+          '--expand',
+          pkgPath,
+          tempDir.path,
+        ]);
+        if (expandResult.exitCode != 0) {
+          logger.err(
+            'pkgutil --expand failed: ${expandResult.stderr}\n${expandResult.stdout}',
+          );
+          throw ProcessExit(expandResult.exitCode);
+        }
+        final payloadFile = tempDir
+            .listSync(recursive: true)
+            .whereType<File>()
+            .firstWhere(
+              (f) => p.basename(f.path) == 'Payload',
+              orElse: () => throw Exception('Payload file not found!'),
+            );
+        final payloadExtractDir = Directory(
+          p.join(tempDir.path, 'payload_extract'),
+        );
+        if (!payloadExtractDir.existsSync()) {
+          payloadExtractDir.createSync();
+        }
+        final cpioResult = await Process.run(
+          'cpio',
+          ['-i', '-F', payloadFile.path],
+          workingDirectory: payloadExtractDir.path,
+        );
+        if (cpioResult.exitCode != 0) {
+          logger.err(
+            'cpio extraction failed: ${cpioResult.stderr}\n${cpioResult.stdout}',
+          );
+          throw ProcessExit(cpioResult.exitCode);
+        }
+        FileSystemEntity? foundApp;
+        await for (final entity in payloadExtractDir.list(recursive: true)) {
+          if (entity is Directory && entity.path.endsWith('.app')) {
+            foundApp = entity;
+            break;
+          }
+        }
+        if (foundApp == null) {
+          logger.err('No .app directory found inside extracted Payload!');
+          throw ProcessExit(ExitCode.software.code);
+        }
+        // Remove original .app directory and replace with extracted .app
+        if (appDirectory.existsSync()) {
+          appDirectory.deleteSync(recursive: true);
+        }
+        Directory(foundApp.path).renameSync(appDirectory.path);
+        logger.info('Replaced original .app with extracted .app from .pkg');
+      } finally {
+        if (tempDir.existsSync()) {
+          tempDir.deleteSync(recursive: true);
+        }
+      }
     }
 
     return appDirectory;
@@ -153,12 +215,11 @@ To change the version of this release, change your app's version in your pubspec
       logger.err('No Info.plist file found at ${plistFile.path}');
       throw ProcessExit(ExitCode.software.code);
     }
-
     try {
       return Plist(file: plistFile).versionNumber;
     } on Exception catch (error) {
       logger.err(
-        '''Failed to determine release version from ${plistFile.path}: $error''',
+        'Failed to determine release version from ${plistFile.path}: $error',
       );
       throw ProcessExit(ExitCode.software.code);
     }
@@ -169,91 +230,8 @@ To change the version of this release, change your app's version in your pubspec
     required Release release,
     required String appId,
   }) async {
-    FileSystemEntity? uploadApp;
-    final builtArtifact = artifactManager.getMacOSAppDirectory(flavor: flavor);
-    final identity = pkgSignIdentity;
-    File? pkgFile;
-    if (identity != null && identity.isNotEmpty) {
-      final appName = builtArtifact != null
-          ? p.basenameWithoutExtension(builtArtifact.path)
-          : null;
-      final pkgPath = appName != null
-          ? p.join(projectRoot.path, 'build', 'macos', 'pkg', '$appName.pkg')
-          : null;
-      if (pkgPath != null && File(pkgPath).existsSync()) {
-        pkgFile = File(pkgPath);
-      }
-    }
-
-    if (pkgFile != null) {
-      final tempDir = Directory.systemTemp.createTempSync(
-        'shorebird_pkg_extract_',
-      );
-      try {
-        // 1. Expand the .pkg file using pkgutil
-        final expandResult = await Process.run('pkgutil', [
-          '--expand',
-          pkgFile.path,
-          tempDir.path,
-        ]);
-        if (expandResult.exitCode != 0) {
-          logger.err(
-            'pkgutil --expand '
-            'failed: ${expandResult.stderr}\n${expandResult.stdout}',
-          );
-          throw ProcessExit(expandResult.exitCode);
-        }
-        // 2. Find the Payload file
-        final payloadFile = tempDir
-            .listSync(recursive: true)
-            .whereType<File>()
-            .firstWhere(
-              (f) => p.basename(f.path) == 'Payload',
-              orElse: () => throw Exception('Payload file not found!'),
-            );
-        // 3. Extract the Payload file to a separate directory
-        final payloadExtractDir = Directory(
-          p.join(tempDir.path, 'payload_extract'),
-        );
-        if (!payloadExtractDir.existsSync()) {
-          payloadExtractDir.createSync();
-        }
-        final cpioResult = await Process.run(
-          'cpio',
-          ['-i', '-F', payloadFile.path],
-          workingDirectory: payloadExtractDir.path,
-        );
-        if (cpioResult.exitCode != 0) {
-          logger.err(
-            'cpio extraction '
-            'failed: ${cpioResult.stderr}\n${cpioResult.stdout}',
-          );
-          throw ProcessExit(cpioResult.exitCode);
-        }
-        // 4. Find the .app directory inside the extracted payload
-        FileSystemEntity? foundApp;
-        await for (final entity in payloadExtractDir.list(recursive: true)) {
-          if (entity is Directory && entity.path.endsWith('.app')) {
-            foundApp = entity;
-            break;
-          }
-        }
-        if (foundApp == null) {
-          logger.err('No .app directory found inside extracted Payload!');
-          throw ProcessExit(ExitCode.software.code);
-        }
-        uploadApp = foundApp;
-        logger.info('Uploading .app extracted from .pkg: ${foundApp.path}');
-      } finally {
-        if (tempDir.existsSync()) {
-          tempDir.deleteSync(recursive: true);
-        }
-      }
-    } else {
-      uploadApp = builtArtifact;
-    }
-
-    if (uploadApp == null || !uploadApp.existsSync()) {
+    final appDirectory = artifactManager.getMacOSAppDirectory(flavor: flavor);
+    if (appDirectory == null || !appDirectory.existsSync()) {
       logger.err('Unable to find .app directory for upload');
       throw ProcessExit(ExitCode.software.code);
     }
@@ -270,7 +248,7 @@ To change the version of this release, change your app's version in your pubspec
     await codePushClientWrapper.createMacosReleaseArtifacts(
       appId: appId,
       releaseId: release.id,
-      appPath: uploadApp.path,
+      appPath: appDirectory.path,
       isCodesigned: codesign,
       podfileLockHash: podfileLockHash,
     );
