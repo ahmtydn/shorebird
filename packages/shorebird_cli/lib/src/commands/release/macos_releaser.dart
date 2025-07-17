@@ -138,14 +138,19 @@ To change the version of this release, change your app's version in your pubspec
       logger.info('Created signed pkg at $pkgPath');
 
       // Extract .app from .pkg and replace the original .app directory
-      final tempDir = Directory.systemTemp.createTempSync(
-        'shorebird_pkg_extract_',
-      );
+      final tempBase = Directory.systemTemp.path;
+      final tempName =
+          'shorebird_pkg_extract_${DateTime.now().millisecondsSinceEpoch}';
+      final tempPath = p.join(tempBase, tempName);
+      final tempDir = Directory(tempPath);
+      if (tempDir.existsSync()) {
+        tempDir.deleteSync(recursive: true);
+      }
       try {
         final expandResult = await Process.run('pkgutil', [
           '--expand',
           pkgPath,
-          tempDir.path,
+          tempPath,
         ]);
         if (expandResult.exitCode != 0) {
           logger.err(
@@ -161,7 +166,7 @@ To change the version of this release, change your app's version in your pubspec
               orElse: () => throw Exception('Payload file not found!'),
             );
         final payloadExtractDir = Directory(
-          p.join(tempDir.path, 'payload_extract'),
+          p.join(tempPath, 'payload_extract'),
         );
         if (!payloadExtractDir.existsSync()) {
           payloadExtractDir.createSync();
