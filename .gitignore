@@ -15,3 +15,7 @@ bin/cache/
 
 # Misc
 .DS_Store
+
+apps
+
+packages/updater

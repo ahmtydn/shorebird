@@ -70,6 +70,13 @@ class ReleaseCommand extends ShorebirdCommand {
         help: 'Codesign the application bundle (iOS only).',
         defaultsTo: true,
       )
+      ..addOption(
+        'pkg-sign',
+        help:
+            'Sign and package the macOS .app as '
+            'a .pkg using productbuild (macOS only). '
+            'Pass the identity as the value.',
+      )
       ..addFlag(
         'dry-run',
         abbr: 'n',

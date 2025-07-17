@@ -32,6 +32,9 @@ class MacosReleaser extends Releaser {
     required super.target,
   });
 
+  /// If set, the value is the identity for productbuild signing. If null or empty, do not sign/pkg.
+  String? get pkgSignIdentity => argResults['pkg-sign'] as String?;
+
   /// Whether to codesign the release.
   bool get codesign => argResults['codesign'] == true;
 
@@ -103,9 +106,37 @@ To change the version of this release, change your app's version in your pubspec
     );
 
     final appDirectory = artifactManager.getMacOSAppDirectory(flavor: flavor);
-    if (appDirectory == null) {
-      logger.err('Unable to find .app directory');
+    if (appDirectory == null || !appDirectory.existsSync()) {
+      logger.err('Unable to find .app directory at ${appDirectory?.path}');
       throw ProcessExit(ExitCode.software.code);
+    }
+
+    final identity = pkgSignIdentity;
+    if (identity != null && identity.isNotEmpty) {
+      final appName = p.basenameWithoutExtension(appDirectory.path);
+      final pkgDir = Directory(
+        p.join(projectRoot.path, 'build', 'macos', 'pkg'),
+      );
+      if (!pkgDir.existsSync()) {
+        pkgDir.createSync(recursive: true);
+      }
+      final pkgPath = p.join(pkgDir.path, '$appName.pkg');
+      final args = [
+        '--component',
+        appDirectory.path,
+        '/Applications',
+        '--sign',
+        identity,
+        pkgPath,
+      ];
+      logger.info('Running productbuild to create signed pkg...');
+      final result = await Process.run('productbuild', args);
+      if (result.exitCode != 0) {
+        logger.err('productbuild failed: ${result.stderr}\n${result.stdout}');
+        throw ProcessExit(result.exitCode);
+      }
+      logger.info('Created signed pkg at $pkgPath');
+      return File(pkgPath);
     }
 
     return appDirectory;
@@ -138,9 +169,57 @@ To change the version of this release, change your app's version in your pubspec
     required Release release,
     required String appId,
   }) async {
-    final appDirectory = artifactManager.getMacOSAppDirectory(flavor: flavor);
-    if (appDirectory == null) {
-      logger.err('Unable to find .app directory');
+    FileSystemEntity? uploadApp;
+    final builtArtifact = artifactManager.getMacOSAppDirectory(flavor: flavor);
+    final identity = pkgSignIdentity;
+    File? pkgFile;
+    if (identity != null && identity.isNotEmpty) {
+      final appName = builtArtifact != null
+          ? p.basenameWithoutExtension(builtArtifact.path)
+          : null;
+      final pkgPath = appName != null
+          ? p.join(projectRoot.path, 'build', 'macos', 'pkg', '$appName.pkg')
+          : null;
+      if (pkgPath != null && File(pkgPath).existsSync()) {
+        pkgFile = File(pkgPath);
+      }
+    }
+
+    if (pkgFile != null) {
+      final tempDir = Directory.systemTemp.createTempSync(
+        'shorebird_pkg_extract_',
+      );
+      final expandResult = await Process.run('pkgutil', [
+        '--expand',
+        pkgFile.path,
+        tempDir.path,
+      ]);
+      if (expandResult.exitCode != 0) {
+        logger.err(
+          'pkgutil --expand '
+          'failed: ${expandResult.stderr}\n${expandResult.stdout}',
+        );
+        throw ProcessExit(expandResult.exitCode);
+      }
+      FileSystemEntity? foundApp;
+      await for (final entity in tempDir.list(recursive: true)) {
+        if (entity is Directory && entity.path.endsWith('.app')) {
+          foundApp = entity;
+          break;
+        }
+      }
+      if (foundApp == null) {
+        logger.err('No .app found in expanded .pkg');
+        throw ProcessExit(ExitCode.software.code);
+      }
+      uploadApp = foundApp;
+      logger.info('Uploading .app extracted from .pkg: ${foundApp.path}');
+    } else {
+      uploadApp = builtArtifact;
+    }
+
+    if (uploadApp == null || !uploadApp.existsSync()) {
+      logger.err('Unable to find .app directory for upload');
       throw ProcessExit(ExitCode.software.code);
     }
 
@@ -156,7 +235,7 @@ To change the version of this release, change your app's version in your pubspec
     await codePushClientWrapper.createMacosReleaseArtifacts(
       appId: appId,
       releaseId: release.id,
-      appPath: appDirectory.path,
+      appPath: uploadApp.path,
       isCodesigned: codesign,
       podfileLockHash: podfileLockHash,
     );
